@@ -1,0 +1,115 @@
+#!/usr/bin/env python
+from __future__ import print_function
+
+import argparse
+import atexit
+import getpass
+import os
+import subprocess
+import sys
+import tempfile
+import shutil
+
+def ask_passphrase(confirm):
+    passphrase = getpass.getpass(prompt='Passphrase: ')
+
+    if confirm:
+        confirm_passphrase = getpass.getpass(prompt='Confirm passphrase: ')
+
+        if passphrase != confirm_passphrase:
+            raise Exception("Passphrase must match")
+
+    return passphrase
+
+def check_encrypted_file_exists(filename):
+    return os.path.exists(filename)
+
+def create_tmp_dir():
+    return tempfile.mkdtemp(prefix='eef.', dir='/dev/shm')
+
+def create_tmp_file(dir):
+    return tempfile.mkstemp(prefix='plain.', dir=dir, text=True)[1]
+
+def decrypt_file(source, destination, passphrase):
+    proc = subprocess.Popen(
+        [
+            "gpg",
+            "--no-use-agent",
+            "--yes",
+            "--quiet",
+            "--decrypt",
+            "--passphrase-fd", "0",
+            "--output", destination,
+            source
+        ],
+        stdin=subprocess.PIPE
+    )
+    proc.stdin.write(passphrase.encode('utf-8'))
+    proc.stdin.close()
+
+    if proc.wait() != 0:
+        sys.exit(1)
+
+def edit_file(filename, editor):
+    cmd = '%s "%s"' % (editor, filename)
+    proc = subprocess.Popen(cmd, shell=True)
+    if proc.wait() != 0:
+        print("Error editing file", file=sys.stderr)
+        sys.exit(1)
+
+def encrypt_file(source, destination, passphrase):
+    proc = subprocess.Popen(
+        [
+            "gpg",
+            "--cipher-algo",
+            "AES256",
+            "--quiet",
+            "--symmetric",
+            "--yes",
+            "--passphrase-fd", "0",
+            "--output", destination,
+            source
+        ],
+        stdin=subprocess.PIPE
+    )
+    proc.stdin.write(passphrase.encode('utf-8'))
+    proc.stdin.close()
+
+    if proc.wait() != 0:
+        sys.exit(1)
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Edit an encrypted file.')
+    parser.add_argument(dest='encrypted_filename', type=str, help='encrypted file to edit')
+    parser.add_argument('-e', '--editor', type=str, help='text editor (default: nano)', default='nano --ignorercfiles')
+    return parser.parse_args()
+
+def shred_dir(dir):
+    proc = subprocess.Popen("find \"%s\" -type f -exec shred '{}' \;" % (dir), shell=True)
+    if proc.wait() != 0:
+        print("Error while shredding files", file=sys.stderr)
+
+def remove_dir(dir):
+    shutil.rmtree(dir)
+
+def main():
+    args = parse_arguments()
+    tmp_dir = create_tmp_dir()
+    atexit.register(remove_dir, tmp_dir)
+    atexit.register(shred_dir, tmp_dir)
+    plain_text_filename = create_tmp_file(tmp_dir)
+    encrypted_file_exists = check_encrypted_file_exists(args.encrypted_filename)
+
+    if not encrypted_file_exists:
+        print("%s does not exist. Starting from empty file." % (args.encrypted_filename))
+
+    passphrase = ask_passphrase(not encrypted_file_exists)
+
+    if encrypted_file_exists:
+        decrypt_file(args.encrypted_filename, plain_text_filename, passphrase)
+
+    edit_file(plain_text_filename, args.editor)
+    encrypt_file(plain_text_filename, args.encrypted_filename, passphrase)
+
+if __name__ == '__main__':
+    main()
